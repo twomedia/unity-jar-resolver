@@ -353,12 +353,16 @@ public class VersionHandler {
     /// </param>
     /// <param name="filter">Optional delegate to filter the returned
     /// list.</param>
+    /// <param name="directories">Directories to search for the assets in the project. Directories
+    /// that don't exist are ignored.</param>
     public static string[] SearchAssetDatabase(string assetsFilter = null,
-                                               FilenameFilter filter = null) {
+                                               FilenameFilter filter = null,
+                                               IEnumerable<string> directories = null) {
         return StringArrayFromObject(InvokeImplMethod("SearchAssetDatabase", null,
                                                       namedArgs: new Dictionary<string, object> {
                                                           { "assetsFilter", assetsFilter },
-                                                          { "filter", filter }
+                                                          { "filter", filter },
+                                                          { "directories", directories },
                                                       }));
     }
 
@@ -494,27 +498,62 @@ public class VersionHandler {
     public static object InvokeMethod(
             Type type, object objectInstance, string methodName,
             object[] args, Dictionary<string, object> namedArgs = null) {
-        MethodInfo method = type.GetMethod(methodName);
-        ParameterInfo[] parameters = method.GetParameters();
-        int numParameters = parameters.Length;
-        object[] parameterValues = new object[numParameters];
-        int numPositionalArgs = args != null ? args.Length : 0;
-        foreach (var parameter in parameters) {
-            int position = parameter.Position;
-            if (position < numPositionalArgs) {
-                parameterValues[position] = args[position];
-                continue;
-            }
-            object namedValue = parameter.RawDefaultValue;
-            if (namedArgs != null) {
-                object overrideValue;
-                if (namedArgs.TryGetValue(parameter.Name, out overrideValue)) {
-                    namedValue = overrideValue;
+        object[] parameterValues = null;
+        int numberOfPositionalArgs = args != null ? args.Length : 0;
+        int numberOfNamedArgs = namedArgs != null ? namedArgs.Count : 0;
+        MethodInfo foundMethod = null;
+        foreach (var method in type.GetMethods()) {
+            if (method.Name != methodName) continue;
+            var parameters = method.GetParameters();
+            int numberOfParameters = parameters.Length;
+            parameterValues = new object[numberOfParameters];
+            int matchedPositionalArgs = 0;
+            int matchedNamedArgs = 0;
+            bool matchedAllRequiredArgs = true;
+            foreach (var parameter in parameters) {
+                var parameterType = parameter.ParameterType;
+                int position = parameter.Position;
+                if (position < numberOfPositionalArgs) {
+                    var positionalArg = args[position];
+                    // If the parameter type doesn't match, ignore this method.
+                    if (positionalArg != null &&
+                        !parameterType.IsAssignableFrom(positionalArg.GetType())) {
+                        break;
+                    }
+                    parameterValues[position] = positionalArg;
+                    matchedPositionalArgs ++;
+                } else if (parameter.RawDefaultValue != DBNull.Value) {
+                    object namedValue = parameter.RawDefaultValue;
+                    if (numberOfNamedArgs > 0) {
+                        object namedArg;
+                        if (namedArgs.TryGetValue(parameter.Name, out namedArg)) {
+                            // If the parameter type doesn't match, ignore this method.
+                            if (namedArg != null &&
+                                !parameterType.IsAssignableFrom(namedArg.GetType())) {
+                                break;
+                            }
+                            namedValue = namedArg;
+                            matchedNamedArgs ++;
+                        }
+                    }
+                    parameterValues[position] = namedValue;
+                } else {
+                    matchedAllRequiredArgs = false;
+                    break;
                 }
             }
-            parameterValues[position] = namedValue;
+            // If all arguments were consumed by the method, we've found a match.
+            if (matchedAllRequiredArgs &&
+                matchedPositionalArgs == numberOfPositionalArgs &&
+                matchedNamedArgs == numberOfNamedArgs) {
+                foundMethod = method;
+                break;
+            }
         }
-        return method.Invoke(objectInstance, parameterValues);
+        if (foundMethod == null) {
+            throw new Exception(String.Format("Method {0}.{1} not found", type.Name, methodName));
+        }
+        return foundMethod.Invoke(objectInstance, parameterValues);
     }
 }
 

@@ -18,6 +18,7 @@
 namespace GooglePlayServices {
     using System;
     using System.Collections.Generic;
+    using System.IO;
     using System.Text.RegularExpressions;
     using Google;
     using UnityEditor;
@@ -45,16 +46,17 @@ namespace GooglePlayServices {
         /// </summary>
         /// <returns>List of XML dependency filenames in the project.</returns>
         private List<string> FindFiles() {
-            var matchingFiles = new List<string>();
-            foreach (var assetGuid in AssetDatabase.FindAssets("t:TextAsset")) {
-                var dependencyFile = AssetDatabase.GUIDToAssetPath(assetGuid);
-                foreach (var regex in fileRegularExpressions) {
-                    if (regex.Match(dependencyFile).Success) {
-                        matchingFiles.Add(dependencyFile);
-                    }
-                }
-            }
-            return matchingFiles;
+            return new List<string>(
+                VersionHandlerImpl.SearchAssetDatabase(
+                    "Dependencies t:TextAsset",
+                    (string filename) => {
+                        foreach (var regex in fileRegularExpressions) {
+                            if (regex.Match(filename).Success) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }, new [] { "Assets", "Packages"}));
         }
 
         /// <summary>

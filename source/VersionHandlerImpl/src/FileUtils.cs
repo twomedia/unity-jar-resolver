@@ -49,34 +49,55 @@ namespace Google {
         }
 
         /// <summary>
+        /// Format a file error.
+        /// </summary>
+        /// <param name="summary">Description of what went wrong.</param>
+        /// <param name="errors">List of failures.</param>
+        public static string FormatError(string summary, List<string> errors) {
+            if (errors.Count > 0) {
+                return String.Format("{0}\n{1}", summary, String.Format("\n", errors.ToArray()));
+            }
+            return "";
+        }
+
+        /// <summary>
         /// Delete a file or directory if it exists.
         /// </summary>
         /// <param name="path">Path to the file or directory to delete if it exists.</param>
         /// <param name="includeMetaFiles">Whether to delete Unity's associated .meta file(s).
         /// </param>
-        /// <returns>true if *any* files or directories were deleted, false otherwise.</returns>
-        public static bool DeleteExistingFileOrDirectory(string path,
-                                                         bool includeMetaFiles = true)
+        /// <returns>List of files, with exception messages for files / directories that could
+        /// not be deleted.</returns>
+        public static List<string> DeleteExistingFileOrDirectory(string path,
+                                                                 bool includeMetaFiles = true)
         {
-            bool deletedFileOrDirectory = false;
+            var failedToDelete = new List<string>();
             if (includeMetaFiles && !path.EndsWith(META_EXTENSION)) {
-                deletedFileOrDirectory = DeleteExistingFileOrDirectory(path + META_EXTENSION);
+                failedToDelete.AddRange(DeleteExistingFileOrDirectory(path + META_EXTENSION));
             }
-            if (Directory.Exists(path)) {
-                var di = new DirectoryInfo(path);
-                di.Attributes &= ~FileAttributes.ReadOnly;
-                foreach (string file in Directory.GetFileSystemEntries(path)) {
-                    DeleteExistingFileOrDirectory(file, includeMetaFiles: includeMetaFiles);
+            try {
+                if (Directory.Exists(path)) {
+                    if (!UnityEditor.FileUtil.DeleteFileOrDirectory(path)) {
+                        var di = new DirectoryInfo(path);
+                        di.Attributes &= ~FileAttributes.ReadOnly;
+                        foreach (string file in Directory.GetFileSystemEntries(path)) {
+                            failedToDelete.AddRange(DeleteExistingFileOrDirectory(
+                                                        file, includeMetaFiles: includeMetaFiles));
+                        }
+                        Directory.Delete(path);
+                    }
                 }
-                Directory.Delete(path);
-                deletedFileOrDirectory = true;
+                else if (File.Exists(path)) {
+                    if (!UnityEditor.FileUtil.DeleteFileOrDirectory(path)) {
+                        File.SetAttributes(path, File.GetAttributes(path) &
+                                           ~FileAttributes.ReadOnly);
+                        File.Delete(path);
+                    }
+                }
+            } catch (Exception ex) {
+                failedToDelete.Add(String.Format("{0} ({1})", path, ex));
             }
-            else if (File.Exists(path)) {
-                File.SetAttributes(path, File.GetAttributes(path) & ~FileAttributes.ReadOnly);
-                File.Delete(path);
-                deletedFileOrDirectory = true;
-            }
-            return deletedFileOrDirectory;
+            return failedToDelete;
         }
 
         /// <summary>
@@ -177,6 +198,53 @@ namespace Google {
         }
 
         /// <summary>
+        /// Convert path to use POSIX directory separators.
+        /// </summary>
+        /// <param name="path">Path to convert.</param>
+        /// <returns>Path with POSIX directory separators.</returns>
+        public static string PosixPathSeparators(string path) {
+            return path != null ? path.Replace("\\", "/") : null;
+        }
+
+        /// <summary>
+        /// Find a path under the specified directory.
+        /// </summary>
+        /// <param name="directory">Directory to search.</param>
+        /// <param name="pathToFind">Path to find.<param>
+        /// <returns>The shortest path to the specified directory if found, null
+        /// ptherwise.</returns>
+        public static string FindPathUnderDirectory(string directory, string pathToFind) {
+            directory = NormalizePathSeparators(directory);
+            if (directory.EndsWith(Path.DirectorySeparatorChar.ToString())) {
+                directory = directory.Substring(0, directory.Length - 1);
+            }
+            var foundPaths = new List<string>();
+            foreach (string path in
+                     Directory.GetDirectories(directory, "*", SearchOption.AllDirectories)) {
+                var relativePath = NormalizePathSeparators(path.Substring(directory.Length + 1));
+                if (relativePath.EndsWith(Path.DirectorySeparatorChar + pathToFind) ||
+                    relativePath.Contains(Path.DirectorySeparatorChar + pathToFind +
+                                          Path.DirectorySeparatorChar)) {
+                    foundPaths.Add(relativePath);
+                }
+            }
+            if (foundPaths.Count == 0) return null;
+            foundPaths.Sort((string lhs, string rhs) => {
+                    return lhs.Length - rhs.Length;
+                });
+            return foundPaths[0];
+        }
+
+        /// <summary>
+        /// Split a path into directory components.
+        /// </summary>
+        /// <param name="path">Path to split.</param>
+        /// <returns>Path components.</returns>
+        public static string[] SplitPathIntoComponents(string path) {
+            return NormalizePathSeparators(path).Split(new [] { Path.DirectorySeparatorChar });
+        }
+
+        /// <summary>
         /// Perform a case insensitive search for a path relative to the current directory.
         /// </summary>
         /// <remarks>
@@ -188,8 +256,7 @@ namespace Google {
         public static string FindDirectoryByCaseInsensitivePath(string pathToFind) {
             var searchDirectory = ".";
             // Components of the path.
-            var components = NormalizePathSeparators(pathToFind).Split(
-                    new [] { Path.DirectorySeparatorChar });
+            var components = SplitPathIntoComponents(pathToFind);
             for (int componentIndex = 0;
                  componentIndex < components.Length && searchDirectory != null;
                  componentIndex++) {
@@ -220,6 +287,50 @@ namespace Google {
                 searchDirectory = matchingPaths[0].Value;
             }
             return NormalizePathSeparators(searchDirectory);
+        }
+
+        /// <summary>
+        /// Checks out a file should Version Control be active and valid.
+        /// </summary>
+        /// <param name="path">Path to the file that needs checking out.</param>
+        /// <param name="logger">Logger, used to log any error messages.</param>
+        /// <returns>False should the checkout fail, otherwise true.</returns>
+        public static bool CheckoutFile(string path, Logger logger) {
+            try {
+                if (UnityEditor.VersionControl.Provider.enabled &&
+                    UnityEditor.VersionControl.Provider.isActive &&
+                    (!UnityEditor.VersionControl.Provider.requiresNetwork ||
+                     UnityEditor.VersionControl.Provider.onlineState ==
+                     UnityEditor.VersionControl.OnlineState.Online)) {
+                    // Unity 2019.1+ broke backwards compatibility of Checkout() by adding an
+                    // optional argument to the method so we dynamically invoke the method to add
+                    // the optional
+                    // argument for the Unity 2019.1+ overload at runtime.
+                    var task = (UnityEditor.VersionControl.Task)VersionHandler.InvokeStaticMethod(
+                        typeof(UnityEditor.VersionControl.Provider),
+                        "Checkout",
+                        new object[] { path, UnityEditor.VersionControl.CheckoutMode.Exact },
+                        namedArgs: null);
+                    task.Wait();
+                    if (!task.success) {
+                        var errorMessage = new List<string>();
+                        errorMessage.Add(String.Format("Failed to checkout {0}.", path));
+                        if (task.messages != null) {
+                            foreach (var message in task.messages) {
+                                if (message != null) errorMessage.Add(message.message);
+                            }
+                        }
+                        logger.Log(String.Join("\n", errorMessage.ToArray()),
+                                   level: LogLevel.Warning);
+                        return false;
+                    }
+                }
+                return true;
+            } catch (Exception ex) {
+                logger.Log(String.Format("Failed to checkout {0} ({1}.", path, ex),
+                           level: LogLevel.Warning);
+                return false;
+            }
         }
     }
 }

@@ -406,6 +406,12 @@ namespace Google {
                     return;
                 }
                 Directory.CreateDirectory(Path.GetDirectoryName(PROJECT_SETTINGS_FILE));
+                if (!FileUtils.CheckoutFile(PROJECT_SETTINGS_FILE, logger)) {
+                    logger.Log(
+                        String.Format("Unable to checkout '{0}'. Project settings were not saved!",
+                                      PROJECT_SETTINGS_FILE), LogLevel.Error);
+                    return;
+                }
                 using (var writer = new XmlTextWriter(new StreamWriter(PROJECT_SETTINGS_FILE)) {
                         Formatting = Formatting.Indented,
                     }) {

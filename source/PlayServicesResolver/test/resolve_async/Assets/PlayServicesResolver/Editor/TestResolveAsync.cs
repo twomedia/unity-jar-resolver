@@ -129,10 +129,16 @@ public class TestResolveAsync {
     private const string ADDITIONAL_DEPENDENCIES_FILENAME = "TestAdditionalDependencies";
 
     /// <summary>
-    /// Disabled Gradle template file.
+    /// Disabled application Gradle template file.
     /// </summary>
     private const string GRADLE_TEMPLATE_DISABLED =
         "Assets/Plugins/Android/mainTemplateDISABLED.gradle";
+
+    /// <summary>
+    /// Disabled library Gradle template file.
+    /// </summary>
+    private const string GRADLE_TEMPLATE_LIBRARY_DISABLED =
+        "Assets/Plugins/Android/mainTemplateLibraryDISABLED.gradle";
 
     /// <summary>
     /// Enabled Gradle template file.
@@ -168,7 +174,8 @@ public class TestResolveAsync {
         // Set of files to ignore (relative to the Assets/Plugins/Android directory) in all tests
         // that do not use the Gradle template.
         var nonGradleTemplateFilesToIgnore = new HashSet<string>() {
-            Path.GetFileName(GRADLE_TEMPLATE_DISABLED)
+            Path.GetFileName(GRADLE_TEMPLATE_DISABLED),
+            Path.GetFileName(GRADLE_TEMPLATE_LIBRARY_DISABLED)
         };
 
         UnityEngine.Debug.Log("Setting up test cases for execution.");
@@ -196,11 +203,52 @@ public class TestResolveAsync {
                         SetupDependencies();
 
                         ResolveWithGradleTemplate(
+                            GRADLE_TEMPLATE_DISABLED,
                             "ExpectedArtifacts/NoExport/GradleTemplate",
                             testCase, testCaseComplete,
                             otherExpectedFiles: new [] {
                                 "Assets/Firebase/m2repository/com/google/firebase/" +
-                                "firebase-app-unity/5.1.1/firebase-app-unity-5.1.1.aar" });
+                                "firebase-app-unity/5.1.1/firebase-app-unity-5.1.1.aar" },
+                            filesToIgnore: new HashSet<string> {
+                                Path.GetFileName(GRADLE_TEMPLATE_LIBRARY_DISABLED)
+                            });
+                    }
+                },
+                new TestCase {
+                    Name = "ResolverForGradleBuildSystemWithTemplateUsingJetifier",
+                    Method = (testCase, testCaseComplete) => {
+                        ClearAllDependencies();
+                        SetupDependencies();
+                        UseJetifier = true;
+
+                        ResolveWithGradleTemplate(
+                            GRADLE_TEMPLATE_DISABLED,
+                            "ExpectedArtifacts/NoExport/GradleTemplateJetifier",
+                            testCase, testCaseComplete,
+                            otherExpectedFiles: new [] {
+                                "Assets/Firebase/m2repository/com/google/firebase/" +
+                                "firebase-app-unity/5.1.1/firebase-app-unity-5.1.1.aar" },
+                            filesToIgnore: new HashSet<string> {
+                                Path.GetFileName(GRADLE_TEMPLATE_LIBRARY_DISABLED)
+                            });
+                    }
+                },
+                new TestCase {
+                    Name = "ResolveForGradleBuildSystemLibraryWithTemplate",
+                    Method = (testCase, testCaseComplete) => {
+                        ClearAllDependencies();
+                        SetupDependencies();
+
+                        ResolveWithGradleTemplate(
+                            GRADLE_TEMPLATE_LIBRARY_DISABLED,
+                            "ExpectedArtifacts/NoExport/GradleTemplateLibrary",
+                            testCase, testCaseComplete,
+                            otherExpectedFiles: new [] {
+                                "Assets/Firebase/m2repository/com/google/firebase/" +
+                                "firebase-app-unity/5.1.1/firebase-app-unity-5.1.1.aar" },
+                            filesToIgnore: new HashSet<string> {
+                                Path.GetFileName(GRADLE_TEMPLATE_DISABLED)
+                            });
                     }
                 },
                 new TestCase {
@@ -225,10 +273,14 @@ public class TestResolveAsync {
                             }
                             ClearAllDependencies();
                             ResolveWithGradleTemplate(
+                                GRADLE_TEMPLATE_DISABLED,
                                 "ExpectedArtifacts/NoExport/GradleTemplateEmpty",
                                 testCase, (testCaseResult) => {
                                     enableDependencies();
                                     testCaseComplete(testCaseResult);
+                                },
+                                filesToIgnore: new HashSet<string> {
+                                    Path.GetFileName(GRADLE_TEMPLATE_LIBRARY_DISABLED)
                                 });
                         } finally {
                             enableDependencies();
@@ -263,6 +315,19 @@ public class TestResolveAsync {
                                 AarsWithNativeLibrariesSupported ?
                                     "ExpectedArtifacts/NoExport/InternalNativeAars" :
                                     "ExpectedArtifacts/NoExport/InternalNativeAarsExploded",
+                                null, nonGradleTemplateFilesToIgnore, testCase, testCaseComplete);
+                    }
+                },
+                new TestCase {
+                    Name = "ResolveForInternalBuildSystemUsingJetifier",
+                    Method = (testCase, testCaseComplete) => {
+                        ClearAllDependencies();
+                        SetupDependencies();
+                        UseJetifier = true;
+                        Resolve("Internal", false,
+                                AarsWithNativeLibrariesSupported ?
+                                    "ExpectedArtifacts/NoExport/InternalNativeAarsJetifier" :
+                                    "ExpectedArtifacts/NoExport/InternalNativeAarsExplodedJetifier",
                                 null, nonGradleTemplateFilesToIgnore, testCase, testCaseComplete);
                     }
                 },
@@ -327,20 +392,26 @@ public class TestResolveAsync {
                     Method = (testCase, testCaseComplete) => {
                         ClearAllDependencies();
                         SetupDependencies();
+                        var filesToIgnore = new HashSet<string> {
+                            Path.GetFileName(GRADLE_TEMPLATE_LIBRARY_DISABLED)
+                        };
 
                         ResolveWithGradleTemplate(
+                            GRADLE_TEMPLATE_DISABLED,
                             "ExpectedArtifacts/NoExport/GradleTemplate",
                             testCase, (testCaseResult) => {
                                 Google.VersionHandler.InvokeStaticMethod(
                                         AndroidResolverClass, "DeleteResolvedLibrariesSync", null);
                                 testCaseResult.ErrorMessages.AddRange(CompareDirectoryContents(
                                             "ExpectedArtifacts/NoExport/GradleTemplateEmpty",
-                                            "Assets/Plugins/Android", null));
+                                            "Assets/Plugins/Android", filesToIgnore));
                                 if (File.Exists(GRADLE_TEMPLATE_ENABLED)) {
                                     File.Delete(GRADLE_TEMPLATE_ENABLED);
                                 }
                                 testCaseComplete(testCaseResult);
-                            }, deleteGradleTemplate: false);
+                            },
+                            deleteGradleTemplate: false,
+                            filesToIgnore: filesToIgnore);
                     }
                 },
             });
@@ -414,6 +485,25 @@ public class TestResolveAsync {
     private static string AndroidAbisCurrentString {
         set { AndroidAbisCurrentStringProperty.SetValue(null, value, null); }
         get { return (string)AndroidAbisCurrentStringProperty.GetValue(null, null); }
+    }
+
+    /// <summary>
+    /// Get the property that gets and sets whether the Jetifier is enabled.
+    /// </summary>
+    private static PropertyInfo UseJetifierBoolProperty {
+        get {
+            return Google.VersionHandler.FindClass(
+                "Google.JarResolver", "GooglePlayServices.SettingsDialog").GetProperty(
+                    "UseJetifier", BindingFlags.Static | BindingFlags.NonPublic);
+        }
+    }
+
+    /// <summary>
+    /// Get / set jetifier setting.
+    /// </summary>
+    private static bool UseJetifier {
+        set { UseJetifierBoolProperty.SetValue(null, value, null); }
+        get { return (bool)UseJetifierBoolProperty.GetValue(null, null); }
     }
 
     /// <summary>
@@ -559,6 +649,11 @@ public class TestResolveAsync {
                 });
             LogSummaryAndExit();
         }
+        // Also, set the internal Gradle version to a deterministic version number.  This controls
+        // how gradle template snippets are generated by GradleTemplateResolver.
+        var resolver = Google.VersionHandler.FindClass("Google.JarResolver",
+                                                       "GooglePlayServices.PlayServicesResolver");
+        resolver.GetProperty("GradleVersion").SetValue(null, "2.14", null);
         testCaseComplete(new TestCaseResult(testCase));
     }
 
@@ -601,6 +696,7 @@ public class TestResolveAsync {
     /// </summary>
     private static void ClearAllDependencies() {
         UnityEngine.Debug.Log("Clear all loaded dependencies");
+        UseJetifier = false;
         AndroidResolverSupport.GetType().GetMethod(
             "ResetDependencies",
             BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, null);
@@ -803,6 +899,7 @@ public class TestResolveAsync {
     /// <summary>
     /// Resolve for Gradle using a template .gradle file.
     /// </summary>
+    /// <param name="gradleTemplate">Gradle template to use.</param>
     /// <param name="expectedAssetsDir">Directory that contains the assets expected from the
     /// resolution step.</param>
     /// <param name="testCase">Object executing this method.</param>
@@ -811,11 +908,14 @@ public class TestResolveAsync {
     /// project.</param>
     /// <param name="deleteGradleTemplate">Whether to delete the gradle template before
     /// testCaseComplete is called.</param>
-    private static void ResolveWithGradleTemplate(string expectedAssetsDir,
+    /// <param name="filesToIgnore">Set of files to relative to the generatedAssetsDir.</param>
+    private static void ResolveWithGradleTemplate(string gradleTemplate,
+                                                  string expectedAssetsDir,
                                                   TestCase testCase,
                                                   Action<TestCaseResult> testCaseComplete,
                                                   IEnumerable<string> otherExpectedFiles = null,
-                                                  bool deleteGradleTemplate = true) {
+                                                  bool deleteGradleTemplate = true,
+                                                  ICollection<string> filesToIgnore = null) {
         var cleanUpFiles = new List<string>();
         if (deleteGradleTemplate) cleanUpFiles.Add(GRADLE_TEMPLATE_ENABLED);
         if (otherExpectedFiles != null) cleanUpFiles.AddRange(otherExpectedFiles);
@@ -825,9 +925,9 @@ public class TestResolveAsync {
             }
         };
         try {
-            File.Copy(GRADLE_TEMPLATE_DISABLED, GRADLE_TEMPLATE_ENABLED);
-            Resolve("Gradle", false, expectedAssetsDir,
-                    null, null, testCase, (TestCaseResult testCaseResult) => {
+            File.Copy(gradleTemplate, GRADLE_TEMPLATE_ENABLED);
+            Resolve("Gradle", false, expectedAssetsDir, null, filesToIgnore, testCase,
+                    (TestCaseResult testCaseResult) => {
                         if (otherExpectedFiles != null) {
                             foreach (var expectedFile in otherExpectedFiles) {
                                 if (!File.Exists(expectedFile)) {
@@ -892,7 +992,7 @@ public class TestResolveAsync {
         // ExtractZip is not part of the public API.
         bool successful = (bool)AndroidResolverClass.GetMethod(
             "ExtractZip", BindingFlags.Static | BindingFlags.NonPublic).Invoke(
-            null, new object[]{ zipFile, null, outputDir });
+                null, new object[]{ zipFile, null, outputDir, false });
         if (!successful) {
             failureMessages.Add(String.Format("Unable to extract {0} to {1}",
                                               zipFile, outputDir));
@@ -900,20 +1000,6 @@ public class TestResolveAsync {
             return null;
         }
         return outputDir;
-    }
-
-    /// <summary>
-    /// In .gradle file contents, replace file:///PROJECT_DIR URIs with the absolute path to the
-    /// project directory.
-    /// </summary>
-    /// <param name="filename">Name of the file.</param>
-    /// <param name="contents">Contents of the file to search and replace.</param>
-    private static string ReplaceFileProjectDirUri(string filename, string contents) {
-        if (filename.ToLower().EndsWith(".gradle")) {
-            return contents.Replace("file:///PROJECT_DIR",
-                                    "file:///" + Path.GetFullPath(".").Replace("\\", "/"));
-        }
-        return contents;
     }
 
     /// <summary>
@@ -1005,12 +1091,10 @@ public class TestResolveAsync {
                         }
                     }
                     if (displayContents) {
-                        expectedContentsAsString = ReplaceFileProjectDirUri(
-                            expectedFile,
-                            System.Text.Encoding.Default.GetString(expectedContents));
-                        resolvedContentsAsString = ReplaceFileProjectDirUri(
-                            expectedFile,
-                            System.Text.Encoding.Default.GetString(resolvedContents));
+                        expectedContentsAsString =
+                            System.Text.Encoding.Default.GetString(expectedContents);
+                        resolvedContentsAsString =
+                            System.Text.Encoding.Default.GetString(resolvedContents);
                         differs = expectedContentsAsString != resolvedContentsAsString;
                     }
                     if (differs) {

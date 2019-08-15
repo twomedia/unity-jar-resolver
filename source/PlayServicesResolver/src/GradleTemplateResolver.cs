@@ -18,6 +18,7 @@ namespace GooglePlayServices {
     using System;
     using System.Collections.Generic;
     using System.IO;
+    using System.Text.RegularExpressions;
 
     using Google;
     using Google.JarResolver;
@@ -48,7 +49,8 @@ namespace GooglePlayServices {
         /// <summary>
         /// Line that indicates where to initially inject repos in the default template.
         /// </summary>
-        private const string ReposInjectionLine = "apply plugin: 'com.android.application'";
+        private const string ReposInjectionLine =
+            @".*apply plugin: 'com\.android\.(application|library)'.*";
 
         /// <summary>
         /// Line that indicates the start of the injected dependencies block in the template.
@@ -65,78 +67,82 @@ namespace GooglePlayServices {
         /// If this isn't present in the template dependencies will not be injected or they'll
         /// be removed.
         /// </summary>
-        private const string DependenciesToken = "**DEPS**";
+        private const string DependenciesToken = @".*\*\*DEPS\*\*.*";
 
         /// <summary>
-        /// Find all srcaar files under a directory.
+        /// Line that indicates the start of the injected exclusions block in the template.
         /// </summary>
-        private static List<string> FindSrcAars(string directory) {
-            var foundFiles = new List<string>();
-            foreach (string filename in Directory.GetFiles(directory)) {
-                if (Path.GetExtension(filename).ToLower() == ".srcaar") {
-                    foundFiles.Add(filename);
-                }
-            }
-            foreach (string currentDirectory in Directory.GetDirectories(directory)) {
-                foundFiles.AddRange(FindSrcAars(currentDirectory));
-            }
-            return foundFiles;
-        }
+        private const string PackagingOptionsStartLine = "// Android Resolver Exclusions Start";
+
+        /// <summary>
+        /// Line that indicates the end of the injected exclusions block in the template.
+        /// </summary>
+        private const string PackagingOptionsEndLine = "// Android Resolver Exclusions End";
+
+        /// <summary>
+        /// Token that indicates where exclusions should be injected.
+        /// </summary>
+        private const string PackagingOptionsToken = @"android +{";
 
         /// <summary>
         /// Copy srcaar files to aar files that are excluded from Unity's build process.
         /// </summary>
+        /// <param name="dependencies">Dependencies to inject.</param>
+        /// <returns>true if successful, false otherwise.</returns>
         private static bool CopySrcAars(ICollection<Dependency> dependencies) {
-            // Find all repositories embedded in the project.
-            var repos = new HashSet<string>();
-            foreach (var dependency in dependencies) {
-                foreach (var repo in dependency.Repositories) {
-                    if (repo.Replace("\\", "/").ToLower().StartsWith("assets/")) {
-                        repos.Add(repo);
-                    }
-                }
-            }
             bool succeeded = true;
             var aarFiles = new List<string>();
             // Copy each .srcaar file to .aar while configuring the plugin importer to ignore the
             // file.
-            foreach (var repo in repos) {
-                foreach (var srcaar in FindSrcAars(repo)) {
-                    var dir = Path.GetDirectoryName(srcaar);
-                    var filename = Path.GetFileNameWithoutExtension(srcaar);
-                    var targetFilename = Path.Combine(dir, filename + ".aar");
-                    aarFiles.Add(targetFilename);
-                    if (!File.Exists(targetFilename)) {
-                        bool configuredAar = false;
-                        if (AssetDatabase.CopyAsset(srcaar, targetFilename) &&
-                            PlayServicesResolver.LabelAssets(
-                                new [] { targetFilename }).Count == 0) {
-                            try {
-                                PluginImporter importer = (PluginImporter)AssetImporter.GetAtPath(
-                                    targetFilename);
-                                importer.SetCompatibleWithAnyPlatform(false);
-                                importer.SetCompatibleWithPlatform(BuildTarget.Android, false);
-                                configuredAar = true;
-                            } catch (Exception ex) {
-                                PlayServicesResolver.Log(String.Format(
-                                    "Failed to disable {0} from being included by Unity's " +
-                                    "internal build.  {0} has been deleted and will not be " +
-                                    "included in Gradle builds. ({1})", srcaar, ex),
-                                    level: LogLevel.Error);
-                            }
-                        } else {
+            foreach (var aar in LocalMavenRepository.FindAarsInLocalRepos(dependencies)) {
+                var dir = Path.GetDirectoryName(aar);
+                var filename = Path.GetFileNameWithoutExtension(aar);
+                var targetFilename = Path.Combine(dir, filename + ".aar");
+                bool configuredAar = File.Exists(targetFilename);
+                if (!configuredAar) {
+                    bool copiedAndLabeledAar = AssetDatabase.CopyAsset(aar, targetFilename);
+                    if (copiedAndLabeledAar) {
+                        var unlabeledAssets = new HashSet<string>();
+                        PlayServicesResolver.LabelAssets(
+                            new [] { targetFilename },
+                            complete: (unlabeled) => { unlabeledAssets.UnionWith(unlabeled); });
+                        copiedAndLabeledAar = unlabeledAssets.Count == 0;
+                    }
+                    if (copiedAndLabeledAar) {
+                        try {
+                            PluginImporter importer = (PluginImporter)AssetImporter.GetAtPath(
+                                targetFilename);
+                            importer.SetCompatibleWithAnyPlatform(false);
+                            importer.SetCompatibleWithPlatform(BuildTarget.Android, false);
+                            configuredAar = true;
+                        } catch (Exception ex) {
                             PlayServicesResolver.Log(String.Format(
-                                "Unable to copy {0} to {1}.  {1} will not be included in Gradle " +
-                                "builds.", srcaar, targetFilename), level: LogLevel.Error);
+                                "Failed to disable {0} from being included by Unity's " +
+                                "internal build.  {0} has been deleted and will not be " +
+                                "included in Gradle builds. ({1})", aar, ex),
+                                level: LogLevel.Error);
                         }
-                        if (!configuredAar) {
-                            if (File.Exists(targetFilename)) {
-                                AssetDatabase.DeleteAsset(targetFilename);
-                            }
-                            succeeded = false;
+                    } else {
+                        PlayServicesResolver.Log(String.Format(
+                            "Unable to copy {0} to {1}.  {1} will not be included in Gradle " +
+                            "builds.", aar, targetFilename), level: LogLevel.Error);
+                    }
+                    if (configuredAar) {
+                        aarFiles.Add(targetFilename);
+                        // Some versions of Unity do not mark the asset database as dirty when
+                        // plugin importer settings change so reimport the asset to synchronize
+                        // the state.
+                        AssetDatabase.ImportAsset(targetFilename, ImportAssetOptions.ForceUpdate);
+                    } else {
+                        if (File.Exists(targetFilename)) {
+                            AssetDatabase.DeleteAsset(targetFilename);
                         }
+                        succeeded = false;
                     }
                 }
+            }
+            foreach (var aar in aarFiles) {
+                if (!LocalMavenRepository.PatchPomFile(aar)) succeeded = false;
             }
             return succeeded;
         }
@@ -147,7 +153,7 @@ namespace GooglePlayServices {
         private class TextFileLineInjector {
             // Token which, if found within a line, indicates where to inject the block of text if
             // the start / end block isn't found
-            private string injectionToken;
+            private Regex injectionToken;
             // Line that indicates the start of the block to replace.
             private string startBlockLine;
             // Line that indicates the end of the block to replace.
@@ -166,8 +172,9 @@ namespace GooglePlayServices {
             /// <summary>
             /// Construct the injector.
             /// </summary>
-            /// <param name="injectionToken">Token which, if found within a line, indicates where
-            /// to inject the block of text if the start / end block isn't found.</param>
+            /// <param name="injectionToken">Regular expression, if found within a line,
+            /// indicates where to inject the block of text if the start / end block isn't
+            /// found.</param>
             /// <param name="startBlockLine">Line which indicates the start of the block to
             /// replace.</param>
             /// <param name="endBlockLine">Line which indicates the end of the block to replace.
@@ -181,7 +188,7 @@ namespace GooglePlayServices {
                                         ICollection<string> replacementLines,
                                         string replacementName,
                                         string fileDescription) {
-                this.injectionToken = injectionToken;
+                this.injectionToken = new Regex(injectionToken);
                 this.startBlockLine = startBlockLine;
                 this.endBlockLine = endBlockLine;
                 this.replacementLines = new List<string>();
@@ -212,7 +219,7 @@ namespace GooglePlayServices {
                     if (trimmedLine.StartsWith(startBlockLine)) {
                         inBlock = true;
                         outputLines.Clear();
-                    } else if (trimmedLine.Contains(injectionToken)) {
+                    } else if (injectionToken.IsMatch(trimmedLine)) {
                         injectBlock = true;
                     }
                 } else {
@@ -239,6 +246,8 @@ namespace GooglePlayServices {
         /// <summary>
         /// Inject / update dependencies in the gradle template file.
         /// </summary>
+        /// <param name="dependencies">Dependencies to inject.</param>
+        /// <returns>true if successful, false otherwise.</returns>
         public static bool InjectDependencies(ICollection<Dependency> dependencies) {
             var fileDescription = String.Format("gradle template {0}", GradleTemplatePath);
             PlayServicesResolver.Log(String.Format("Reading {0}", fileDescription),
@@ -257,9 +266,10 @@ namespace GooglePlayServices {
                                                    fileDescription),
                                      level: LogLevel.Verbose);
             // Determine whether dependencies should be injected.
+            var dependenciesToken = new Regex(DependenciesToken);
             bool containsDeps = false;
             foreach (var line in lines) {
-                if (line.Contains(DependenciesToken)) {
+                if (dependenciesToken.IsMatch(line)) {
                     containsDeps = true;
                     break;
                 }
@@ -278,15 +288,32 @@ namespace GooglePlayServices {
             // the Gradle build.
             if (!CopySrcAars(dependencies)) return false;
 
+            var repoLines = new List<string>();
+            // Optionally enable the jetifier.
+            if (SettingsDialog.UseJetifier && dependencies.Count > 0) {
+                repoLines.AddRange(new [] {
+                        "([rootProject] + (rootProject.subprojects as List)).each {",
+                        "    ext {",
+                        "        it.setProperty(\"android.useAndroidX\", true)",
+                        "        it.setProperty(\"android.enableJetifier\", true)",
+                        "    }",
+                        "}"
+                    });
+            }
+            repoLines.AddRange(PlayServicesResolver.GradleMavenReposLines(dependencies));
+
             TextFileLineInjector[] injectors = new [] {
                 new TextFileLineInjector(ReposInjectionLine, ReposStartLine, ReposEndLine,
-                                         PlayServicesResolver.GradleMavenReposLines(dependencies),
-                                         "Repos", fileDescription),
+                                         repoLines, "Repos", fileDescription),
                 new TextFileLineInjector(DependenciesToken, DependenciesStartLine,
                                          DependenciesEndLine,
                                          PlayServicesResolver.GradleDependenciesLines(
                                              dependencies, includeDependenciesBlock: false),
-                                         "Dependencies", fileDescription)
+                                         "Dependencies", fileDescription),
+                new TextFileLineInjector(PackagingOptionsToken, PackagingOptionsStartLine,
+                                         PackagingOptionsEndLine,
+                                         PlayServicesResolver.PackagingOptionsLines(dependencies),
+                                         "Packaging Options", fileDescription),
             };
             // Lines that will be written to the output file.
             var outputLines = new List<string>();
@@ -298,6 +325,12 @@ namespace GooglePlayServices {
                     if (injectionApplied || currentOutputLines.Count == 0) break;
                 }
                 outputLines.AddRange(currentOutputLines);
+            }
+            if (!FileUtils.CheckoutFile(GradleTemplatePath, PlayServicesResolver.logger)) {
+                PlayServicesResolver.Log(
+                    String.Format("Failed to checkout '{0}', unable to patch the file.",
+                                  GradleTemplatePath), level: LogLevel.Error);
+                return false;
             }
             PlayServicesResolver.Log(
                 String.Format("Writing updated {0}", fileDescription),

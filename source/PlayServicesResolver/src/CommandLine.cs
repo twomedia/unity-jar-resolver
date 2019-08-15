@@ -559,6 +559,10 @@ namespace GooglePlayServices
                 toolPath.Contains("\'")) {
                 useShellExecution = true;
                 stdoutRedirectionInShellMode = true;
+            } else if (!(toolPath.StartsWith("\"") || toolPath.StartsWith("'"))) {
+                // If the path isn't quoted normalize separators.
+                // Windows can't execute commands using POSIX paths.
+                toolPath = FileUtils.NormalizePathSeparators(toolPath);
             }
 
             string stdoutFileName = null;
@@ -650,8 +654,14 @@ namespace GooglePlayServices
             result.exitCode = process.ExitCode;
             result.message = FormatResultMessage(toolPath, arguments, result.stdout,
                                                  result.stderr, result.exitCode);
-            Console.InputEncoding = inputEncoding;
-            Console.OutputEncoding = outputEncoding;
+            try {
+                Console.InputEncoding = inputEncoding;
+                Console.OutputEncoding = outputEncoding;
+            } catch (Exception e) {
+                UnityEngine.Debug.LogWarning(String.Format(
+                    "Unable to restore console input / output  encoding to {0} & {1}. {2}",
+                    inputEncoding, outputEncoding, e));
+            }
             return result;
         }
 
