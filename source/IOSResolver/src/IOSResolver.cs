@@ -85,6 +85,19 @@ public class IOSResolver : AssetPostprocessor {
         /// In the form major.minor
         /// </summary>
         public string minTargetSdk = null;
+        
+        /// <summary>
+        /// The name of the target that this pod should apply to.
+        /// For example, "MyAppleWatchExtension"
+        /// </summary>
+        public string targetName = null;
+        
+        /// <summary>
+        /// The target platform for this pod.
+        /// See https://guides.cocoapods.org/syntax/podfile.html#platform for the list of
+        /// supported platforms.
+        /// </summary>
+        public string targetPlatform = DEFAULT_PLATFORM;
 
         /// <summary>
         /// Tag that indicates where this was created.
@@ -168,8 +181,14 @@ public class IOSResolver : AssetPostprocessor {
         /// a source.</param>
         /// <param name="propertiesByName">Dictionary of additional properties for the pod
         /// reference.</param>
+        /// <param name="targetName">The name of the target that this pod should apply to.
+        /// For example, "MyAppleWatchExtension"</param>
+        /// <param name="targetPlatform">The target platform for this pod.
+        /// See https://guides.cocoapods.org/syntax/podfile.html#platform for the list of
+        /// supported platforms.</param>
         public Pod(string name, string version, bool bitcodeEnabled, string minTargetSdk,
-                   IEnumerable<string> sources, Dictionary<string, string> propertiesByName) {
+                   IEnumerable<string> sources, Dictionary<string, string> propertiesByName,
+                   string targetName, string targetPlatform) {
             this.name = name;
             this.version = version;
             if (propertiesByName != null) {
@@ -177,6 +196,10 @@ public class IOSResolver : AssetPostprocessor {
             }
             this.bitcodeEnabled = bitcodeEnabled;
             this.minTargetSdk = minTargetSdk;
+            this.targetName = targetName ?? TARGET_NAME;
+            if (!String.IsNullOrEmpty(targetPlatform)) {
+                this.targetPlatform = targetPlatform;
+            }
             if (sources != null) {
                 var allSources = new List<string>(sources);
                 allSources.AddRange(this.sources);
@@ -210,6 +233,8 @@ public class IOSResolver : AssetPostprocessor {
                    name == pod.name &&
                    version == pod.version &&
                    propertiesByName.Count == pod.propertiesByName.Count &&
+                   targetName == pod.targetName &&
+                   targetPlatform == pod.targetPlatform &&
                    propertiesByName.Keys.All(key =>
                        pod.propertiesByName.ContainsKey(key) &&
                        propertiesByName[key] == pod.propertiesByName[key]);
@@ -305,6 +330,8 @@ public class IOSResolver : AssetPostprocessor {
             string versionSpec = null;
             bool bitcodeEnabled = true;
             string minTargetSdk = null;
+            string targetName = null;
+            string targetPlatform = null;
             var propertiesByName = new Dictionary<string, string>();
             if (!XmlUtilities.ParseXmlTextFileElements(
                 filename, logger,
@@ -332,6 +359,8 @@ public class IOSResolver : AssetPostprocessor {
                             bitcodeEnabled |= trueStrings.Contains(bitcodeEnabledString);
                             bitcodeEnabled &= !falseStrings.Contains(bitcodeEnabledString);
                             minTargetSdk = reader.GetAttribute("minTargetSdk");
+                            targetName = reader.GetAttribute("targetName");
+                            targetPlatform = reader.GetAttribute("targetPlatform");
                             sources = new List<string>();
                             if (podName == null) {
                                 logger.Log(
@@ -344,6 +373,8 @@ public class IOSResolver : AssetPostprocessor {
                             AddPodInternal(podName, preformattedVersion: versionSpec,
                                            bitcodeEnabled: bitcodeEnabled,
                                            minTargetSdk: minTargetSdk,
+                                           targetName:targetName,
+                                           targetPlatform:targetPlatform,
                                            sources: sources,
                                            overwriteExistingPod: false,
                                            createdBy: String.Format("{0}:{1}",
@@ -383,9 +414,10 @@ public class IOSResolver : AssetPostprocessor {
         }
     }
 
-    // Dictionary of pods to install in the generated Xcode project.
-    private static SortedDictionary<string, Pod> pods =
-        new SortedDictionary<string, Pod>();
+    // Two-Dimensional Dictionary of pods to install in the generated Xcode project.
+    // <string: Target Name, <string: Pod Name, Pod: Pod Object>>
+    private static SortedDictionary<string, SortedDictionary<string, Pod>> pods =
+        new SortedDictionary<string, SortedDictionary<string, Pod>>();
 
     // Order of post processing operations.
     private const int BUILD_ORDER_REFRESH_DEPENDENCIES = 1;
@@ -425,7 +457,9 @@ public class IOSResolver : AssetPostprocessor {
     /// Main executable target of the Xcode project generated by Unity.
     /// </summary>
     public static string TARGET_NAME = null;
-
+    
+    // Default target platform
+    private const string DEFAULT_PLATFORM = "ios";
     // Keys in the editor preferences which control the behavior of this module.
     private const string PREFERENCE_NAMESPACE = "Google.IOSResolver.";
     // Whether Legacy Cocoapod installation (project level) is enabled.
@@ -946,10 +980,25 @@ public class IOSResolver : AssetPostprocessor {
     }
 
     /// <summary>
-    /// Determine whether a Pod is present in the list of dependencies.
+    /// Determine whether a Pod is present in any targets list of dependencies.
     /// </summary>
     public static bool PodPresent(string pod) {
-        return (new List<string>(pods.Keys)).Contains(pod);
+        foreach (SortedDictionary<string, Pod> podDict in pods.Values) {
+            if (new List<string>(podDict.Keys).Contains(pod)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    /// <summary>
+    /// Determine whether a Pod is present in the list of dependencies for a specific target.
+    /// </summary>
+    public static bool PodPresentInTarget(string pod,string target) {
+        if (pods.TryGetValue(target, out var podDict)) {
+            return (new List<string>(podDict.Keys)).Contains(pod);
+        }
+        return false;
     }
 
     /// <summary>
@@ -1003,14 +1052,21 @@ public class IOSResolver : AssetPostprocessor {
     /// Each source is a URL that is injected in the source section of a Podfile
     /// See https://guides.cocoapods.org/syntax/podfile.html#source for the description of
     /// a source.</param>
+    /// <param name="targetName">The name of the target that this pod should apply to.
+    /// For example, "MyAppleWatchExtension"</param>
+    /// <param name="targetPlatform">The target platform for this pod.
+    /// See https://guides.cocoapods.org/syntax/podfile.html#platform for the list of
+    /// supported platforms.</param>
     public static void AddPod(string podName, string version = null,
                               bool bitcodeEnabled = true,
                               string minTargetSdk = null,
-                              IEnumerable<string> sources = null) {
+                              IEnumerable<string> sources = null,
+                              string targetName = null,
+                              string targetPlatform = null) {
         AddPodInternal(podName,
                        preformattedVersion: PodVersionExpressionFromVersionDep(version),
                        bitcodeEnabled: bitcodeEnabled, minTargetSdk: minTargetSdk,
-                       sources: sources);
+                       sources: sources,targetName:targetName,targetPlatform:targetPlatform);
     }
 
     /// <summary>
@@ -1026,6 +1082,11 @@ public class IOSResolver : AssetPostprocessor {
     /// be configured with bitcode disabled.</param>
     /// <param name="minTargetSdk">Minimum SDK revision required by this
     /// pod.</param>
+    /// <param name="targetName">The name of the target that this pod should apply to.
+    /// For example, "MyAppleWatchExtension"</param>
+    /// <param name="targetPlatform">The target platform for this pod.
+    /// See https://guides.cocoapods.org/syntax/podfile.html#platform for the list of
+    /// supported platforms.</param>
     /// <param name="sources">List of sources to search for all pods.
     /// Each source is a URL that is injected in the source section of a Podfile
     /// See https://guides.cocoapods.org/syntax/podfile.html#source for the description of
@@ -1039,42 +1100,55 @@ public class IOSResolver : AssetPostprocessor {
                                        string preformattedVersion = null,
                                        bool bitcodeEnabled = true,
                                        string minTargetSdk = null,
+                                       string targetName = null,
+                                       string targetPlatform = null,
                                        IEnumerable<string> sources = null,
                                        bool overwriteExistingPod = true,
                                        string createdBy = null,
                                        bool fromXmlFile = false,
                                        Dictionary<string, string> propertiesByName = null) {
         var pod = new Pod(podName, preformattedVersion, bitcodeEnabled, minTargetSdk,
-                          sources, propertiesByName);
+                          sources, propertiesByName,targetName,targetPlatform);
         pod.createdBy = createdBy ?? pod.createdBy;
         pod.fromXmlFile = fromXmlFile;
 
         Log(String.Format(
             "AddPod - name: {0} version: {1} bitcode: {2} sdk: {3} sources: {4}, " +
             "properties: {5}\n" +
-            "createdBy: {6}\n\n",
+            "createdBy: {6}\n" +
+            "targetName: {7}\n" +
+            "targetPlatform: {8}\n\n",
             podName, preformattedVersion ?? "null", bitcodeEnabled.ToString(),
             minTargetSdk ?? "null",
             sources != null ? String.Join(", ", (new List<string>(sources)).ToArray()) : "(null)",
             Pod.PropertyDictionaryToString(pod.propertiesByName),
-            createdBy ?? pod.createdBy),
+            createdBy ?? pod.createdBy,
+            targetName ?? "null",
+            targetPlatform ?? "null"),
             verbose: true);
 
-        Pod existingPod = null;
-        if (!overwriteExistingPod && pods.TryGetValue(podName, out existingPod)) {
+        if (!overwriteExistingPod && pods.TryGetValue(pod.targetName, out var targetDict) && 
+            targetDict.TryGetValue(podName,out var existingPod)) {
             // Only warn if the existing pod differs to the newly added pod.
             if (!pod.Equals(existingPod)) {
                 Log(String.Format("Pod {0} already present, ignoring.\n" +
                                   "Original declaration {1}\n" +
                                   "Ignored declaration {2}\n", podName,
-                                  pods[podName].createdBy, createdBy ?? "(unknown)"),
+                        existingPod.createdBy, createdBy ?? "(unknown)"),
                     level: LogLevel.Warning);
             }
             return;
         }
-        pods[podName] = pod;
 
-        UpdateTargetSdk(pod);
+        // Create target dictionary if required.
+        if (!pods.TryGetValue(pod.targetName, out var updateDict)) {
+            pods.Add(pod.targetName,new SortedDictionary<string, Pod>());
+        }
+        
+        pods[pod.targetName][podName] = pod;
+
+        // Only update target SDK if the target is iOS
+        if (pod.targetName == DEFAULT_PLATFORM) UpdateTargetSdk(pod);
     }
 
     /// <summary>
@@ -1148,10 +1222,13 @@ public class IOSResolver : AssetPostprocessor {
     /// (value) is null otherwise.</returns>
     private static KeyValuePair<int, List<string>> TargetSdkNeedsUpdate() {
         var kvpair = new KeyValuePair<int, List<string>>(0, null);
-        var podListsByVersion = Pod.BucketByMinSdkVersion(pods.Values);
-        if (podListsByVersion.Count == 0) {
-            return kvpair;
-        }
+        
+        pods.TryGetValue(DEFAULT_PLATFORM, out var iosPods);
+        if (iosPods == null) return kvpair;
+        
+        var podListsByVersion = Pod.BucketByMinSdkVersion(iosPods.Values);
+        if (podListsByVersion.Count == 0) return kvpair;
+        
         KeyValuePair<int, List<string>> minVersionAndPodName = kvpair;
         foreach (var versionAndPodList in podListsByVersion) {
             minVersionAndPodName = versionAndPodList;
@@ -1287,14 +1364,91 @@ public class IOSResolver : AssetPostprocessor {
     }
 
     /// <summary>
+    /// Gets the SDK version for the specified target.
+    /// </summary>
+    /// <param name="targetName">Name of the executable target in the Xcode project.</param>
+    /// <returns>SDK version for specified target. For custom targets, returns ios minTargetSdk
+    /// when no pods found or no pods specify minTargetSdk.</returns>
+    private static string GetSdkVersionForTarget(string targetName) {
+        // If default iOS target then return minimum SDK version from
+        // Unity iOS build settings
+        if (targetName == TARGET_NAME) {
+            return TargetSdk;
+        }
+        // Find the lowest sdk version for this target
+        int sdkVersion = 0;
+        if (pods.TryGetValue(targetName, out var targetPods)) {
+            foreach (var pod in targetPods) {
+                int podSdkVersion = pod.Value.MinTargetSdkToVersion();
+                if (sdkVersion==0 || (podSdkVersion!=0 && sdkVersion > podSdkVersion)) {
+                    sdkVersion = podSdkVersion;
+                }
+            }
+            if (sdkVersion == 0) {
+                if (GetPlatformForTarget(targetName) != DEFAULT_PLATFORM) {
+                    Log(String.Format(
+                            "Custom target \"{0}\" didnt specify a minTargetSdk " +
+                            "in any of it's xml dependency files.\n\n" +
+                            "Defaulting to ios minTargetSdk: \"{1}\"\n\n" +
+                            "This may result in pod errors since a custom " +
+                            "targetPlatform is specified.",
+                            targetName),
+                        level: LogLevel.Warning);
+                }
+                sdkVersion = TargetSdkVersion;
+            }
+        }
+        return TargetSdkVersionToString(sdkVersion);
+    }
+    
+    /// <summary>
+    /// Gets the platform for the specified target.
+    /// </summary>
+    /// <param name="targetName">Name of the executable target in the Xcode project.</param>
+    /// <returns>Platform for specified target. For custom targets, this is determined by the
+    /// targetPlatform value in the targets pods which defaults to "ios" if not specified</returns>
+    private static string GetPlatformForTarget(string targetName) {
+        // If default iOS target then return minimum SDK version from
+        // Unity iOS build settings
+        if (targetName == TARGET_NAME) {
+            return DEFAULT_PLATFORM;
+        }
+        // Find the lowest sdk version for this target
+        string targetPlatform = null;
+        bool multiTargetPlatformDetected = false;
+        if (pods.TryGetValue(targetName, out var targetPods)) {
+            foreach (var pod in targetPods) {
+                if (targetPlatform == null) {
+                    targetPlatform = pod.Value.targetPlatform;
+                }
+                if (targetPlatform != pod.Value.targetPlatform) {
+                    multiTargetPlatformDetected = true;
+                }
+            }
+        }
+        if (multiTargetPlatformDetected) {
+            Log(String.Format(
+                    "Pods for target \"{0}\" specify multiple targetPlatforms.\n" +
+                    "\n" +
+                    "Please change this so that all pods for this target specify the " +
+                    "same targetPlatform. Using \"{1}\" for now.",
+                    targetName,targetPlatform),
+                level: LogLevel.Warning);
+        }
+        return targetPlatform;
+    }
+
+    /// <summary>
     /// Determine whether any pods need bitcode disabled.
     /// </summary>
     /// <returns>List of pod names with bitcode disabled.</return>
     private static List<string> FindPodsWithBitcodeDisabled() {
         var disabled = new List<string>();
-        foreach (var pod in pods.Values) {
-            if (!pod.bitcodeEnabled) {
-                disabled.Add(pod.name);
+        foreach (var targetPods in pods.Values) {
+            foreach (var pod in targetPods.Values) {
+                if (!pod.bitcodeEnabled) {
+                    disabled.Add(pod.name);
+                }
             }
         }
         return disabled;
@@ -1687,13 +1841,15 @@ public class IOSResolver : AssetPostprocessor {
         }
         do {
             sourcesAvailable = false;
-            foreach (var pod in pods.Values) {
-                if (sourceIndex < pod.sources.Count) {
-                    sourcesAvailable = true;
-                    var source = pod.sources[sourceIndex];
-                    if (processedSources.Add(source)) {
-                        interleavedSourcesLines.Add(String.Format("source '{0}'", source));
-                    }
+            foreach (var targetPods in pods.Values) {
+                foreach (var pod in targetPods.Values) {
+                    if (sourceIndex < pod.sources.Count) {
+                        sourcesAvailable = true;
+                        var source = pod.sources[sourceIndex];
+                        if (processedSources.Add(source)) {
+                            interleavedSourcesLines.Add(String.Format("source '{0}'", source));
+                        }
+                    }   
                 }
             }
             sourceIndex ++;
@@ -1727,13 +1883,15 @@ public class IOSResolver : AssetPostprocessor {
                           (CocoapodsProjectIntegrationEnabled ? "Xcode project" : "no target"))),
             verbose: true);
         using (StreamWriter file = new StreamWriter(podfilePath)) {
-            file.Write(GeneratePodfileSourcesSection() +
-                       String.Format("platform :ios, '{0}'\n\n", TargetSdk) +
-                       "target '" + TARGET_NAME + "' do\n");
-            foreach(var pod in pods.Values) {
-                file.WriteLine(pod.PodFilePodLine);
+            file.Write(GeneratePodfileSourcesSection());
+            foreach(var targetPods in pods) {
+                file.Write("\ntarget '" + targetPods.Key + "' do\n");
+                file.Write("platform :{0}, '{1}'\n\n", GetPlatformForTarget(targetPods.Key),GetSdkVersionForTarget(targetPods.Key));
+                foreach (var pod in targetPods.Value.Values) {
+                    file.WriteLine(pod.PodFilePodLine);
+                }
+                file.WriteLine("end");
             }
-            file.WriteLine("end");
         }
     }
 
@@ -2208,14 +2366,12 @@ public class IOSResolver : AssetPostprocessor {
     /// </summary>
     private static void RefreshXmlDependencies() {
         // Remove all pods that were added via XML dependencies.
-        var podsToRemove = new List<string>();
-        foreach (var podNameAndPod in pods) {
-            if (podNameAndPod.Value.fromXmlFile) {
-                podsToRemove.Add(podNameAndPod.Key);
+        foreach (var targetPods in pods.ToList()) {
+            foreach (var podNameAndPod in targetPods.Value.ToList()) {
+                if (podNameAndPod.Value.fromXmlFile) {
+                    pods[targetPods.Key].Remove(podNameAndPod.Key);
+                }
             }
-        }
-        foreach (var podName in podsToRemove) {
-            pods.Remove(podName);
         }
         // Clear all sources (only can be set via XML config).
         Pod.Sources = new List<KeyValuePair<string, string>>();
